@@ -1,0 +1,97 @@
+stages:
+  - lint
+  - build
+  - deploy review
+variables:
+  NODE_VERSION: 20
+  CONTAINER_NAME: creativehub-front
+  DEV_NGINX_CONTAINER: main_nginx
+  DEV_NETWORK: devserver_default
+  DEV_ENV_PATH: .env
+  PROD_NGINX_CONTAINER: server-a-nginx
+  PROD_NETWORK: auditor_default
+  PROD_ENV_PATH: .env
+  PROD_TAG: server-a-shell
+  
+cache:
+  paths:
+    - node_modules/
+lint:
+  image: node:${NODE_VERSION}
+  stage: lint
+  script:
+    - npm install
+    - npm run lint
+  tags:
+    - group-docker-build-runner
+  rules:
+    - if: '$CI_COMMIT_BRANCH != "develop" && $CI_COMMIT_BRANCH != "main" &&  $CI_PIPELINE_SOURCE != "merge_request_event"'
+
+front dev build:
+  stage: build
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_JOB_TOKEN $CI_REGISTRY
+    - rm -f .env*
+    - cp $DEV_ENV $DEV_ENV_PATH
+  script:
+    - docker pull $CI_REGISTRY_IMAGE:latest || true
+    - docker build --cache-from $CI_REGISTRY_IMAGE:latest --tag $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA --tag $CI_REGISTRY_IMAGE:latest .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE:latest
+  tags:
+    -  group-shell-runner
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+front dev deploy:
+  stage: deploy review
+  script:
+    - echo "Deploy review front"
+    - docker login -u $CI_REGISTRY_USER -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker pull $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - if [ -n "$(docker ps -qa --filter name=$CONTAINER_NAME)" ]; then docker rm -f $CONTAINER_NAME ; fi; 
+    - docker run -d --network $DEV_NETWORK --hostname  $CONTAINER_NAME --name $CONTAINER_NAME --restart unless-stopped $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - docker restart main_nginx
+    - echo 'y' | docker system prune --all
+  needs: ["front dev build"]
+  tags:
+    - group-deploy-shell
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+front prod build:
+  stage: build
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_JOB_TOKEN $CI_REGISTRY
+    - rm -f .env*
+    - cp $PROD_ENV $PROD_ENV_PATH
+  script:
+    - docker pull $CI_REGISTRY_IMAGE/prod:latest || true
+    - docker build -f Dockerfile --cache-from $CI_REGISTRY_IMAGE/prod:latest -t prod:latest .
+    - docker tag prod:latest $CI_REGISTRY_IMAGE/prod:$CI_COMMIT_SHA
+    - docker tag prod:latest $CI_REGISTRY_IMAGE/prod:latest
+    - docker push $CI_REGISTRY_IMAGE/prod:$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE/prod:latest
+  tags:
+     -  group-shell-runner
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+front prod deploy:
+  stage: deploy review
+  script:
+   - echo "Deploy review front"
+    - docker login -u $CI_REGISTRY_USER -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker pull $CI_REGISTRY_IMAGE/prod:$CI_COMMIT_SHA
+    - if [ -n "$(docker ps -qa --filter name=$CONTAINER_NAME)" ]; then docker rm -f $CONTAINER_NAME ; fi; 
+    - docker run -d --network $PROD_NETWORK --hostname  $CONTAINER_NAME --name $CONTAINER_NAME --restart unless-stopped $CI_REGISTRY_IMAGE/prod:$CI_COMMIT_SHA
+    - echo 'y' | docker system prune --all
+  when: manual
+  allow_failure: false
+  needs: ["front prod build"]
+  tags:
+    - $PROD_TAG
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+
